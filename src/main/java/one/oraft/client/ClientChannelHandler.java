@@ -7,7 +7,6 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.Objects;
 import java.util.function.BiConsumer;
 
-// TODO ClientChannelHandler
 @Slf4j
 public class ClientChannelHandler extends SimpleChannelInboundHandler<String> {
 
