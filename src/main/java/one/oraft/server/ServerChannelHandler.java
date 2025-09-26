@@ -22,4 +22,8 @@ public class ServerChannelHandler extends SimpleChannelInboundHandler<String> {
         messageConsumer.accept(ctx, msg);
     }
 
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        log.error("[server-channel-handler] exception caught: {}", cause.getMessage());
+    }
 }

@@ -81,7 +81,7 @@ public class RaftNode {
             gatherVoteCount.set(1);
             currentTerm = currentTerm + 1;
             electionTimestamp = System.currentTimeMillis();
-            log.info("[raft-node]:{} election timeout, turn to candidate_node term: {}", id, currentTerm);
+            log.info("[raft-node]:{} check timeout, turn to candidate_node term: {}", id, currentTerm);
             return true;
         }
         if ((state == State.STATE_CANDIDATE && System.currentTimeMillis() - electionTimestamp > ELECTION_TIMEOUT * 1000)
