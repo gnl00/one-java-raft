@@ -18,6 +18,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -38,6 +39,8 @@ public class RaftServer implements BaseServer {
 
     private Map<Integer, ClientChannelHandler> clientChannelHandlerMap = Collections.synchronizedMap(new HashMap<>());
 
+    private ScheduledFuture<?> leaderScheduledFuture;
+
     public RaftServer(int port, String host) {
         this.port = port;
         this.host = host;
@@ -53,8 +56,8 @@ public class RaftServer implements BaseServer {
         server = new NettyServer(port, host, new ServerChannelHandler(((ctx, msg) -> onRpcMessage(ctx, msg))));
         EXECUTOR_SERVICE.execute(() -> server.start());
         Registry.doRegistry(nextNodeId, this);
-        SCHEDULED_EXECUTOR_SERVICE.scheduleAtFixedRate(() -> checkTimeout(), node.getTimeout(), node.getTimeout(), TimeUnit.SECONDS);
-        log.info("[raft-server]:{} checkTimeout start timeout={}/s", node.getId(), node.getTimeout());
+        SCHEDULED_EXECUTOR_SERVICE.scheduleAtFixedRate(() -> checkTimeout(), node.getTIMEOUT(), node.getTIMEOUT(), TimeUnit.SECONDS);
+        log.info("[raft-server]:{} checkTimeout start timeout={}/s", node.getId(), node.getTIMEOUT());
     }
 
     /**
@@ -63,16 +66,11 @@ public class RaftServer implements BaseServer {
      */
     private void checkTimeout() {
         log.info("[raft-server]:{} check-timeout", node.getId());
-        // if leader timeout, follower_node turn to candidate_node and try to get vote
-        if (node.getState() == State.STATE_FOLLOWER
-                && !node.isHasLeader()
-                && !node.getHasCandidate().get()
-        ) {
-            node.setState(State.STATE_CANDIDATE);
-            int lastLogTerm = node.getTerm();
-            node.setTerm(node.getTerm() + 1);
-            log.info("[raft-server]:{} election timeout, turn to candidate_node", node.getId());
-            requestVote(Map.of("term", node.getTerm(), "candidateId", node.getId(), "lastLogTerm", lastLogTerm, "lastLogIndex", -1));
+        if (node.getId() != node.getLeaderId() && Objects.nonNull(leaderScheduledFuture)) {
+            stopLeaderScheduled();
+        }
+        if (node.checkTimeout()) {
+            requestVote(Map.of("term", node.getCurrentTerm(), "candidateId", node.getId(), "lastLogTerm", node.getCurrentTerm() - 1, "lastLogIndex", -1));
         }
     }
 
@@ -111,9 +109,13 @@ public class RaftServer implements BaseServer {
 
     @Override
     public void appendEntries() {
+        if (node.getId() != node.getLeaderId() && Objects.nonNull(leaderScheduledFuture)) {
+            stopLeaderScheduled();
+            return;
+        }
         String json = JSON.toJSONString(Map.of(
                 "RPC_TYPE", RPCTypeEnum.AppendEntries.getType(),
-                "term", node.getTerm(),
+                "term", node.getCurrentTerm(),
                 "leaderId", node.getId(),
                 "prevLogIndex", -1,
                 "prevLogTerm", -1,
@@ -124,6 +126,12 @@ public class RaftServer implements BaseServer {
             if (entry.getKey().equals(node.getId())) continue;
             entry.getValue().send(json);
         }
+    }
+
+
+    private void stopLeaderScheduled() {
+        leaderScheduledFuture.cancel(true);
+        leaderScheduledFuture = null;
     }
 
     private void onRpcMessage(ChannelHandlerContext ctx, String msg) {
@@ -141,7 +149,7 @@ public class RaftServer implements BaseServer {
                 handleRequestVote(ctx, request);
                 break;
             case VoteGranted:
-                handleVoteGranted(ctx, request);
+                handleVoteGranted(request);
                 break;
             case AppendEntries:
                 // 处理 AppendEntries RPC
@@ -158,50 +166,34 @@ public class RaftServer implements BaseServer {
      * 每个 node 在当前 term 只能投票一次
      */
     private void handleRequestVote(ChannelHandlerContext ctx, Map<String, Object> request) {
-        log.info("[server-channel-handler]:{} handleRequestVote hasLeader: {} hasCandidate: {}", node.getId(), node.isHasLeader(), node.getHasCandidate().get());
-        boolean voteGranted = false;
-        if (!node.isHasLeader() && node.getHasCandidate().compareAndSet(false, true)) {
-            voteGranted = true;
-        }
-        ctx.writeAndFlush(JSON.toJSONString(Map.of("RPC_TYPE", RPCTypeEnum.VoteGranted.getType(), "term", request.get("term"), "voteGranted", voteGranted)));
+        log.info("[server-channel-handler]:{} handleRequestVote leaderId: {} votedFor: {}", node.getId(), node.getLeaderId(), node.getVotedFor());
+        Integer candidateId = (Integer) request.get("candidateId");
+        Integer term = (Integer) request.get("term");
+        boolean voteGranted = node.voteGranted(candidateId, term);
+        log.info("[server-channel-handler]:{} handleRequestVote voted, vote for candidateId: {} ? {}", node.getId(), candidateId, voteGranted);
+        ctx.writeAndFlush(JSON.toJSONString(Map.of("RPC_TYPE", RPCTypeEnum.VoteGranted.getType(), "term", node.getCurrentTerm(), "voteGranted", voteGranted)));
     }
 
     /**
      * STATE_CANDIDATE 如果收到了来自follower的投票结果RPC，进行统计，如果超过半数的节点同意，则成为leader
      */
-    private void handleVoteGranted(ChannelHandlerContext ctx, Map<String, Object> request) {
-        log.info("[server-channel-handler]:{} handleVoteGranted hasLeader: {} hasCandidate: {}", node.getId(), node.isHasLeader(), node.getHasCandidate().get());
-        Integer term = (Integer)request.get("term");
-        boolean voteGranted = (boolean)request.get("voteGranted");
-        if (!node.isHasLeader()
-                && node.getState().equals(State.STATE_CANDIDATE)
-                && voteGranted
-                && node.getTerm() == term
-        ) {
-            int voteCounts = node.getGatherVoteCounts().incrementAndGet();
-            if (voteCounts >= (Registry.getServerCount() / 2) + 1) {
-                log.info("[server-channel-handler]:{} got voteCounts: {} become leader!", node.getId(), voteCounts);
-                node.setState(State.STATE_LEADER);
-                appendEntries();
-            }
+    private void handleVoteGranted(Map<String, Object> request) {
+        log.info("[server-channel-handler]:{} handleVoteGranted leaderId: {} votedFor: {}", node.getId(), node.getLeaderId(), node.getVotedFor());
+        Integer term = (Integer) request.get("term");
+        boolean voteGranted = (boolean) request.get("voteGranted");
+        boolean upgradedToLeader = node.tryUpgradeToLeader(term, voteGranted);
+        if (upgradedToLeader) {
+            leaderScheduledFuture = SCHEDULED_EXECUTOR_SERVICE.scheduleAtFixedRate(() -> appendEntries(), 0, 3, TimeUnit.SECONDS);
         }
     }
 
     /**
      * STATE_FOLLOWER/STATE_CANDIDATE 如果收到了来自leader的AppendEntries RPC，则转为follower状态
      */
-    private void handleAppendEntries(Map<String, Object> request) {
+    public void handleAppendEntries(Map<String, Object> request) {
         Integer leaderId = (Integer) request.get("leaderId");
         Integer term = (Integer) request.get("term");
-        if (node.getState().isActive() && term >= node.getTerm()) {
-            node.setState(State.STATE_FOLLOWER);
-            node.setHasLeader(true);
-            node.setLeaderId(leaderId);
-            node.setTerm(term);
-        }
         List<Object> entries = (List<Object>) request.get("entries");
-        if (null == entries || entries.isEmpty()) {
-            log.info("[server-channel-handler]:{} handleAppendEntries received heart-beat from leaderId: {}", node.getId(), leaderId);
-        }
+        node.handleAppendEntries(leaderId, term, entries);
     }
 }
