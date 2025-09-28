@@ -20,6 +20,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
 @Data
@@ -29,6 +30,10 @@ public class RaftServer implements BaseServer {
 
     private static final ScheduledExecutorService SCHEDULED_EXECUTOR_SERVICE = Executors.newScheduledThreadPool(Runtime.getRuntime().availableProcessors() * 2);
 
+    private static volatile AtomicBoolean STOP_THE_FIRST_LEADER = new AtomicBoolean(false);
+
+    private final Map<Integer, ClientChannelHandler> clientChannelHandlerMap = Collections.synchronizedMap(new HashMap<>());
+
     private int port;
 
     private String host;
@@ -37,7 +42,7 @@ public class RaftServer implements BaseServer {
 
     private NettyServer server;
 
-    private Map<Integer, ClientChannelHandler> clientChannelHandlerMap = Collections.synchronizedMap(new HashMap<>());
+    private NettyClient client;
 
     private ScheduledFuture<?> leaderScheduledFuture;
 
@@ -58,6 +63,15 @@ public class RaftServer implements BaseServer {
         Registry.doRegistry(nextNodeId, this);
         SCHEDULED_EXECUTOR_SERVICE.scheduleAtFixedRate(() -> checkTimeout(), node.getTIMEOUT(), node.getTIMEOUT(), TimeUnit.SECONDS);
         log.info("[raft-server]:{} checkTimeout start timeout={}/s", node.getId(), node.getTIMEOUT());
+    }
+
+    public void stop() {
+        if (Objects.nonNull(server) && server.stop()
+                && Objects.nonNull(client) && client.stop()) {
+            node.stop();
+            clientChannelHandlerMap.remove(node.getId());
+            log.info("[raft-server]:{} server stopped", node.getId());
+        }
     }
 
     /**
@@ -88,7 +102,7 @@ public class RaftServer implements BaseServer {
                 ClientChannelHandler clientChannelHandler = new ClientChannelHandler(((ctx, msg) -> onRpcMessage(ctx, msg)));
                 CompletableFuture<Boolean> connectedFuture = new CompletableFuture<>();
                 EXECUTOR_SERVICE.execute(() -> {
-                    NettyClient client = new NettyClient(clientChannelHandler, connectedFuture);
+                    client = new NettyClient(clientChannelHandler, connectedFuture);
                     client.connect(remoteServer.getHost(), remoteServer.getPort());
                 });
                 connectedFuture.whenComplete((connected, t) -> {
@@ -115,6 +129,7 @@ public class RaftServer implements BaseServer {
         }
         String json = JSON.toJSONString(Map.of(
                 "RPC_TYPE", RPCTypeEnum.AppendEntries.getType(),
+                "timestamp", System.currentTimeMillis(),
                 "term", node.getCurrentTerm(),
                 "leaderId", node.getId(),
                 "prevLogIndex", -1,
@@ -130,8 +145,10 @@ public class RaftServer implements BaseServer {
 
 
     private void stopLeaderScheduled() {
-        leaderScheduledFuture.cancel(true);
-        leaderScheduledFuture = null;
+        if (Objects.nonNull(leaderScheduledFuture)) {
+            leaderScheduledFuture.cancel(true);
+            leaderScheduledFuture = null;
+        }
     }
 
     private void onRpcMessage(ChannelHandlerContext ctx, String msg) {
@@ -171,7 +188,7 @@ public class RaftServer implements BaseServer {
         Integer term = (Integer) request.get("term");
         boolean voteGranted = node.voteGranted(candidateId, term);
         log.info("[server-channel-handler]:{} handleRequestVote voted, vote for candidateId: {} ? {}", node.getId(), candidateId, voteGranted);
-        ctx.writeAndFlush(JSON.toJSONString(Map.of("RPC_TYPE", RPCTypeEnum.VoteGranted.getType(), "term", node.getCurrentTerm(), "voteGranted", voteGranted)));
+        ctx.writeAndFlush(RpcMessageBuilder.build(JSON.toJSONString(Map.of("RPC_TYPE", RPCTypeEnum.VoteGranted.getType(), "term", node.getCurrentTerm(), "voteGranted", voteGranted))));
     }
 
     /**
@@ -183,7 +200,13 @@ public class RaftServer implements BaseServer {
         boolean voteGranted = (boolean) request.get("voteGranted");
         boolean upgradedToLeader = node.tryUpgradeToLeader(term, voteGranted);
         if (upgradedToLeader) {
-            leaderScheduledFuture = SCHEDULED_EXECUTOR_SERVICE.scheduleAtFixedRate(() -> appendEntries(), 0, 3, TimeUnit.SECONDS);
+            leaderScheduledFuture = SCHEDULED_EXECUTOR_SERVICE.scheduleAtFixedRate(() -> appendEntries(), 0, 5, TimeUnit.SECONDS);
+            if (STOP_THE_FIRST_LEADER.compareAndSet(false, true)) {
+                SCHEDULED_EXECUTOR_SERVICE.schedule(() -> {
+                    stop();
+                    log.info("[raft-server]:{} stopped the first leader", node.getId());
+                }, 10, TimeUnit.SECONDS);
+            }
         }
     }
 

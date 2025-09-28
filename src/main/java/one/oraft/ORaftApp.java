@@ -6,5 +6,7 @@ public class ORaftApp {
         new RaftServer(6001, "localhost").start();
         new RaftServer(6002, "localhost").start();
         new RaftServer(6003, "localhost").start();
+        new RaftServer(6004, "localhost").start();
+        new RaftServer(6005, "localhost").start();
     }
 }

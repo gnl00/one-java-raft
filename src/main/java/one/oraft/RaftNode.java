@@ -129,7 +129,7 @@ public class RaftNode {
             int voteCounts = gatherVoteCount.incrementAndGet();
             int majority = (Registry.getServerCount() / 2) + 1;
             if (voteCounts >= majority) {
-                log.info("[raft-node]:{} got voteCount: {}/{} become leader!", id, voteCounts, majority);
+                log.info("[raft-node]:{} got voteCount: {}/{} become leader!", id, voteCounts, Registry.getServerCount());
                 leaderId = id;
                 votedFor = -1;
                 gatherVoteCount.set(0);
@@ -170,4 +170,10 @@ public class RaftNode {
         // TODO handleLogAppend logic
     }
 
+    public void stop() {
+        leaderId = -1;
+        state = State.STATE_SHUTDOWN;
+        Registry.remove(id);
+        log.info("[raft-node]:{} stop", id);
+    }
 }

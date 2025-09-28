@@ -3,6 +3,7 @@ package one.oraft.client;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import lombok.extern.slf4j.Slf4j;
+import one.oraft.RpcMessageBuilder;
 
 import java.util.Objects;
 import java.util.function.BiConsumer;
@@ -26,14 +27,14 @@ public class ClientChannelHandler extends SimpleChannelInboundHandler<String> {
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, String msg) {
-        log.info("[client-channel-handler] received: {}", msg);
+        // log.info("[client-channel-handler] received: {}", msg);
         messageConsumer.accept(ctx, msg);
     }
 
     public void send(String jsonStr) {
         if (Objects.nonNull(ctx)) {
-            log.info("[client-channel-handler] sending: {}", jsonStr);
-            ctx.writeAndFlush(jsonStr);
+            // log.info("[client-channel-handler] sending: {}", jsonStr);
+            ctx.writeAndFlush(RpcMessageBuilder.build(jsonStr));
         }
     }
 }

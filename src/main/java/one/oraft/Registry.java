@@ -23,6 +23,10 @@ public class Registry {
         REGISTRY_CENTER.put(nodeId, serverNode);
     }
 
+    public static void remove(Integer id) {
+        REGISTRY_CENTER.remove(id);
+    }
+
     public static Map<Integer, RaftServer> discoveryMap() {
         return REGISTRY_CENTER;
     }
