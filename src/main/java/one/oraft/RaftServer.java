@@ -32,7 +32,7 @@ public class RaftServer implements BaseServer {
 
     private static volatile AtomicBoolean STOP_THE_FIRST_LEADER = new AtomicBoolean(false);
 
-    private final Map<Integer, ClientChannelHandler> clientChannelHandlerMap = Collections.synchronizedMap(new HashMap<>());
+    private final Map<Integer, NettyClient> clientMap = Collections.synchronizedMap(new HashMap<>());
 
     private int port;
 
@@ -41,8 +41,6 @@ public class RaftServer implements BaseServer {
     private RaftNode node;
 
     private NettyServer server;
-
-    private NettyClient client;
 
     private ScheduledFuture<?> leaderScheduledFuture;
 
@@ -66,11 +64,15 @@ public class RaftServer implements BaseServer {
     }
 
     public void stop() {
-        if (Objects.nonNull(server) && server.stop()
-                && Objects.nonNull(client) && client.stop()) {
+        if (Objects.nonNull(server) && server.stop()) {
             node.stop();
-            clientChannelHandlerMap.remove(node.getId());
-            log.info("[raft-server]:{} server stopped", node.getId());
+            for (NettyClient client : clientMap.values()) {
+                if (client != null) {
+                    client.stop();
+                }
+            }
+            clientMap.clear();
+            log.info("[raft-server]:{} server stopped", getId());
         }
     }
 
@@ -99,25 +101,25 @@ public class RaftServer implements BaseServer {
                 if (Objects.equals(remoteServer.getId(), this.getId())) {
                     continue;
                 }
-                ClientChannelHandler clientChannelHandler = new ClientChannelHandler(((ctx, msg) -> onRpcMessage(ctx, msg)));
-                CompletableFuture<Boolean> connectedFuture = new CompletableFuture<>();
                 EXECUTOR_SERVICE.execute(() -> {
-                    client = new NettyClient(clientChannelHandler, connectedFuture);
-                    client.connect(remoteServer.getHost(), remoteServer.getPort());
+                    ClientChannelHandler clientChannelHandler = new ClientChannelHandler(((ctx, msg) -> onRpcMessage(ctx, msg)));
+                    CompletableFuture<Boolean> connectedCallback = new CompletableFuture<>();
+                    NettyClient c = new NettyClient(clientChannelHandler);
+                    c.connect(remoteServer.getHost(), remoteServer.getPort(), connectedCallback);
+                    connectedCallback.whenComplete((connected, t) -> {
+                        if (connected) {
+                            clientMap.put(remoteServer.getId(), c);
+                            log.info("[raft-server]:{} requestVote, client connected", getId());
+                            c.send(JSON.toJSONString(reqMap));
+                        } else {
+                            log.info("[raft-server]:{} requestVote, client connect error", getId(), t);
+                            c.stop();
+                        }
+                    });
                 });
-                connectedFuture.whenComplete((connected, t) -> {
-                    if (connected) {
-                        log.info("[raft-server]:{} requestVote, client connected", node.getId());
-                        clientChannelHandlerMap.put(remoteServer.getId(), clientChannelHandler);
-                        clientChannelHandler.send(JSON.toJSONString(reqMap));
-                    } else {
-                        log.info("[raft-server]:{} requestVote, client connect error", node.getId(), t);
-                    }
-                });
-
             }
         } catch (Exception e) {
-            log.error("[raft-server] requestVote nodeId: {}, error", node.getId(), e);
+            log.error("[raft-server] requestVote nodeId: {}, error", getId(), e);
         }
     }
 
@@ -137,8 +139,8 @@ public class RaftServer implements BaseServer {
                 "leaderCommit", -1,
                 "entries", Collections.emptyList()
         ));
-        for (Map.Entry<Integer, ClientChannelHandler> entry : clientChannelHandlerMap.entrySet()) {
-            if (entry.getKey().equals(node.getId())) continue;
+        for (Map.Entry<Integer, NettyClient> entry : clientMap.entrySet()) {
+            if (entry.getKey().equals(getId())) continue;
             entry.getValue().send(json);
         }
     }

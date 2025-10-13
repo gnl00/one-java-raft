@@ -23,22 +23,20 @@ import java.util.concurrent.CompletableFuture;
 @NoArgsConstructor
 public class NettyClient {
 
+    private static final MultiThreadIoEventLoopGroup G = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
+
     private ChannelHandler channelHandler;
 
-    private CompletableFuture<Boolean> clientFuture;
+    private ChannelFuture clientConnectedFuture;
 
-    MultiThreadIoEventLoopGroup g;
-
-    public NettyClient(ChannelHandler channelHandler, CompletableFuture<Boolean> clientFuture) {
+    public NettyClient(ChannelHandler channelHandler) {
         this.channelHandler = channelHandler;
-        this.clientFuture = clientFuture;
     }
 
-    public void connect(String host, int port) {
+    public void connect(String host, int port, CompletableFuture<Boolean> clientConnectedCallback) {
         Bootstrap bootstrap = new Bootstrap();
         try {
-            g = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
-            bootstrap.group(g)
+            bootstrap.group(G)
                     .channel(NioSocketChannel.class)
                     .remoteAddress(host, port)
                     .handler(new ChannelInitializer<NioSocketChannel>() {
@@ -53,22 +51,22 @@ public class NettyClient {
                         }
                     })
             ;
-            ChannelFuture future = bootstrap.connect().sync();
+            clientConnectedFuture = bootstrap.connect().sync();
             log.info("[netty-client] connected to {}:{}", host, port);
-            clientFuture.complete(true);
-            future.channel().closeFuture().sync();
+            clientConnectedCallback.complete(true);
         } catch (InterruptedException e) {
             log.error("[netty-client] connect to {}:{} error", host, port, e);
-        } finally {
-            if (g != null) {
-                g.shutdownGracefully();
-            }
+            clientConnectedCallback.completeExceptionally(e);
         }
     }
 
+    public void send(String msg) {
+        ((ClientChannelHandler) channelHandler).send(msg);
+    }
+
     public boolean stop() {
-        if (g != null) {
-            g.shutdownGracefully();
+        if (clientConnectedFuture != null) {
+            clientConnectedFuture.channel().close();
             return true;
         }
         return false;
