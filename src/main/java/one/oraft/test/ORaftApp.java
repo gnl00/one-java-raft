@@ -1,4 +1,6 @@
-package one.oraft;
+package one.oraft.test;
+
+import one.oraft.RaftServer;
 
 public class ORaftApp {
     public static void main(String[] args) {
