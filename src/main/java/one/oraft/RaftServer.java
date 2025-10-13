@@ -101,22 +101,29 @@ public class RaftServer implements BaseServer {
                 if (Objects.equals(remoteServer.getId(), this.getId())) {
                     continue;
                 }
-                EXECUTOR_SERVICE.execute(() -> {
-                    ClientChannelHandler clientChannelHandler = new ClientChannelHandler(((ctx, msg) -> onRpcMessage(ctx, msg)));
-                    CompletableFuture<Boolean> connectedCallback = new CompletableFuture<>();
-                    NettyClient c = new NettyClient(clientChannelHandler);
-                    c.connect(remoteServer.getHost(), remoteServer.getPort(), connectedCallback);
-                    connectedCallback.whenComplete((connected, t) -> {
-                        if (connected) {
-                            clientMap.put(remoteServer.getId(), c);
-                            log.info("[raft-server]:{} requestVote, client connected", getId());
-                            c.send(JSON.toJSONString(reqMap));
-                        } else {
-                            log.info("[raft-server]:{} requestVote, client connect error", getId(), t);
-                            c.stop();
-                        }
+                Integer peerId = remoteServer.getId();
+                NettyClient existingClient = clientMap.get(peerId);
+                if (null != existingClient) {
+                    log.info("[raft-server]:{} requestVote, client existed", peerId);
+                    existingClient.send(JSON.toJSONString(reqMap));
+                } else {
+                    EXECUTOR_SERVICE.execute(() -> {
+                        ClientChannelHandler clientChannelHandler = new ClientChannelHandler(((ctx, msg) -> onRpcMessage(ctx, msg)));
+                        CompletableFuture<Boolean> connectedCallback = new CompletableFuture<>();
+                        NettyClient c = new NettyClient(clientChannelHandler);
+                        c.connect(remoteServer.getHost(), remoteServer.getPort(), connectedCallback);
+                        connectedCallback.whenComplete((connected, t) -> {
+                            if (connected) {
+                                clientMap.put(remoteServer.getId(), c);
+                                log.info("[raft-server]:{} requestVote, client connected", getId());
+                                c.send(JSON.toJSONString(reqMap));
+                            } else {
+                                log.info("[raft-server]:{} requestVote, client connect error", getId(), t);
+                                c.stop();
+                            }
+                        });
                     });
-                });
+                }
             }
         } catch (Exception e) {
             log.error("[raft-server] requestVote nodeId: {}, error", getId(), e);
